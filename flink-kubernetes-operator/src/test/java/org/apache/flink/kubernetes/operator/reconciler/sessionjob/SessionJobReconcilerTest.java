@@ -1091,4 +1091,39 @@ public class SessionJobReconcilerTest extends OperatorTestBase {
         assertFalse(deleteControl.isRemoveFinalizer());
         assertEquals(10_000, deleteControl.getScheduleDelay().get());
     }
+
+    /** Demonstrate savepoint-redeploy failure observed for session jobs. */
+    @Test
+    public void testSavepointRedeployAfterSavepointSuspend() throws Exception {
+        // submit job
+        var readyCtx = TestUtils.createContextWithReadyFlinkDeployment(kubernetesClient);
+        FlinkSessionJob sessionJob = TestUtils.buildSessionJob();
+        sessionJob.getSpec().getJob().setUpgradeMode(UpgradeMode.SAVEPOINT);
+
+        // reconcile and verify
+        reconciler.reconcile(sessionJob, readyCtx);
+        verifyAndSetRunningJobsToStatus(
+                sessionJob, JobState.RUNNING, RECONCILING, null, flinkService.listJobs());
+        Assertions.assertNotNull(sessionJob.getStatus().getJobStatus().getJobId());
+
+        // savepoint suspend
+        sessionJob.getSpec().getJob().setState(JobState.SUSPENDED);
+
+        // reconcile and verify
+        reconciler.reconcile(sessionJob, readyCtx);
+        verifyJobState(sessionJob, JobState.SUSPENDED, FINISHED);
+        assertNull(sessionJob.getStatus().getJobStatus().getJobId());
+
+        // request redeploy from explicit savepoint
+        sessionJob.getSpec().getJob().setState(JobState.RUNNING);
+        sessionJob.getSpec().getJob().setInitialSavepointPath("s3://bucket/savepoint-explicit");
+        sessionJob.getSpec().getJob().setSavepointRedeployNonce(1L);
+
+        // reconcile and verify
+        reconciler.reconcile(sessionJob, readyCtx);
+        assertEquals(1, flinkService.listJobs().size());
+        assertEquals(
+                "s3://bucket/savepoint-explicit",
+                verifyAndReturnTheSubmittedJob(sessionJob, flinkService.listJobs()).f0);
+    }
 }
